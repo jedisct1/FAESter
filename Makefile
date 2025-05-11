@@ -29,7 +29,7 @@ HEADERS = $(SRC_DIR)/faester_avx512.h $(SRC_DIR)/untrinsics/untrinsics.h $(SRC_D
 
 .PHONY: all clean bench run
 
-all: benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties
+all: benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test
 
 bench: benchmark benchmark_advanced
 
@@ -48,8 +48,11 @@ avalanche_detailed: avalanche_detailed.c $(SRCS) $(HEADERS)
 crypto_properties: crypto_properties.c $(SRCS) $(HEADERS)
 	$(CC) $(ALL_FLAGS) -o $@ $< $(SRCS) -lm
 
+diffusion_test: diffusion_test.c $(SRCS) $(HEADERS)
+	$(CC) $(ALL_FLAGS) -o $@ $< $(SRCS) -lm
+
 clean:
-	rm -f benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties
+	rm -f benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test
 
 run: benchmark
 	./benchmark
@@ -65,3 +68,6 @@ run_avalanche_detailed: avalanche_detailed
 
 run_crypto: crypto_properties
 	./crypto_properties
+
+run_diffusion: diffusion_test
+	./diffusion_test
