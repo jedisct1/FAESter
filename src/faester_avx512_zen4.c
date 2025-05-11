@@ -3,6 +3,7 @@
 
 // Round constants derived from binary expansion of π - precomputed for all lanes at once
 // This simplifies and speeds up constant loading - a major optimization
+// Use 64-byte alignment for optimal cache line alignment on Zen 4
 static const uint32_t RC[8][16] __attribute__((aligned(64))) = {
     // Precomputed constants for offset 0, 1, 2, 3
     {
@@ -92,15 +93,24 @@ void faester_extract(const faester_state_t *state, uint8_t *output) {
 // This version uses a completely different approach with two key optimizations:
 // 1. Process two rounds at once to amortize memory operations
 // 2. Use precomputed round constants to minimize instruction count
+// Mark this function as hot to prioritize it during optimization
+__attribute__((hot))
 void faester_permute(faester_state_t *state, const int rounds) {
+    // Prefetch round constants to L1 cache
+    // This helps on Zen 4 where L1 cache latency is critical
+    for (int i = 0; i < 8; i++) {
+        __builtin_prefetch(&RC[i], 0, 3); // Read (0), high temporal locality (3)
+    }
+
     // Load state into registers
     __m512i a = state->blocks[0];
     __m512i b = state->blocks[1];
     __m512i c = state->blocks[2];
     __m512i d = state->blocks[3];
-    
+
     // Fast round constant access to improve cache locality
-    const __m512i *rc_table = (__m512i*)RC;
+    // Cast to const to ensure compiler doesn't reorder unnecessarily
+    const __m512i * const rc_table = (__m512i*)RC;
     
     // OPTIMIZATION: Process rounds in pairs to reduce memory ops and improve pipelining
     int r = 0;
@@ -125,22 +135,37 @@ void faester_permute(faester_state_t *state, const int rounds) {
         c = _mm512_shuffle_i32x4(t2, t2, 0x39);
         d = _mm512_shuffle_i32x4(t3, t3, 0xC6);
         
-        // Mixing - straight through implementation to minimize register pressure
+        // Mixing - optimized for Zen 4 with reduced dependencies
+        // Save original a for later use
         t0 = a;
+
+        // Pre-compute all shift operations before XORs to improve instruction parallelism
+        // This helps Zen 4 schedule operations across multiple execution units
+        __m512i b_shift = _mm512_srli_epi32(b, 8);
+        __m512i d_shift24 = _mm512_slli_epi32(d, 24);
+        __m512i c_shift = _mm512_srli_epi32(c, 8);
+        __m512i a_shift24 = _mm512_slli_epi32(t0, 24);
+
         // Mix 1: Combine b and d parts
-        __m512i mix_bd = _mm512_or_si512(_mm512_srli_epi32(b, 8), _mm512_slli_epi32(d, 24));
+        __m512i mix_bd = _mm512_or_si512(b_shift, d_shift24);
         a = _mm512_xor_si512(a, mix_bd);
-        
+
         // Mix 2: Combine c and original a parts
-        __m512i mix_ca = _mm512_or_si512(_mm512_srli_epi32(c, 8), _mm512_slli_epi32(t0, 24));
+        __m512i mix_ca = _mm512_or_si512(c_shift, a_shift24);
         b = _mm512_xor_si512(b, mix_ca);
-        
+
+        // Second batch of precomputed shifts
+        __m512i d_shift = _mm512_srli_epi32(d, 8);
+        __m512i b_shift24 = _mm512_slli_epi32(b, 24);
+        __m512i a_shift = _mm512_srli_epi32(t0, 8);
+        __m512i c_shift24 = _mm512_slli_epi32(c, 24);
+
         // Mix 3: Combine d and new b parts
-        __m512i mix_db = _mm512_or_si512(_mm512_srli_epi32(d, 8), _mm512_slli_epi32(b, 24));
+        __m512i mix_db = _mm512_or_si512(d_shift, b_shift24);
         c = _mm512_xor_si512(c, mix_db);
-        
+
         // Mix 4: Combine original a and new c parts
-        __m512i mix_ac = _mm512_or_si512(_mm512_srli_epi32(t0, 8), _mm512_slli_epi32(c, 24));
+        __m512i mix_ac = _mm512_or_si512(a_shift, c_shift24);
         d = _mm512_xor_si512(d, mix_ac);
         
         // Precompute combined values for second AES
@@ -174,23 +199,38 @@ void faester_permute(faester_state_t *state, const int rounds) {
         c = _mm512_shuffle_i32x4(t2, t2, 0x39);
         d = _mm512_shuffle_i32x4(t3, t3, 0xC6);
         
-        // Mixing - with new values (no need to store original a this time)
-        // Mix 1: Combine b and d parts for next round
-        mix_bd = _mm512_or_si512(_mm512_srli_epi32(b, 8), _mm512_slli_epi32(d, 24));
-        t0 = a; // Save a for reuse in mix 2 and 4
-        a = _mm512_xor_si512(a, mix_bd);
-        
-        // Mix 2: Combine c and original a parts
-        mix_ca = _mm512_or_si512(_mm512_srli_epi32(c, 8), _mm512_slli_epi32(t0, 24));
-        b = _mm512_xor_si512(b, mix_ca);
-        
-        // Mix 3: Combine d and new b parts
-        mix_db = _mm512_or_si512(_mm512_srli_epi32(d, 8), _mm512_slli_epi32(b, 24));
-        c = _mm512_xor_si512(c, mix_db);
-        
-        // Mix 4: Combine original a and new c parts
-        mix_ac = _mm512_or_si512(_mm512_srli_epi32(t0, 8), _mm512_slli_epi32(c, 24));
-        d = _mm512_xor_si512(d, mix_ac);
+        // Mixing - optimized for Zen 4 with reduced dependencies (second round)
+        // Save original a for later use
+        t0 = a;
+
+        // Pre-compute all shift operations before XORs to improve instruction parallelism
+        // This helps Zen 4 schedule operations across multiple execution units
+        b_shift = _mm512_srli_epi32(b, 8);
+        d_shift24 = _mm512_slli_epi32(d, 24);
+        c_shift = _mm512_srli_epi32(c, 8);
+        a_shift24 = _mm512_slli_epi32(t0, 24);
+
+        // Mix 1: Combine b and d parts (second round)
+        __m512i mix_bd2 = _mm512_or_si512(b_shift, d_shift24);
+        a = _mm512_xor_si512(a, mix_bd2);
+
+        // Mix 2: Combine c and original a parts (second round)
+        __m512i mix_ca2 = _mm512_or_si512(c_shift, a_shift24);
+        b = _mm512_xor_si512(b, mix_ca2);
+
+        // Second batch of precomputed shifts
+        d_shift = _mm512_srli_epi32(d, 8);
+        b_shift24 = _mm512_slli_epi32(b, 24);
+        a_shift = _mm512_srli_epi32(t0, 8);
+        c_shift24 = _mm512_slli_epi32(c, 24);
+
+        // Mix 3: Combine d and new b parts (second round)
+        __m512i mix_db2 = _mm512_or_si512(d_shift, b_shift24);
+        c = _mm512_xor_si512(c, mix_db2);
+
+        // Mix 4: Combine original a and new c parts (second round)
+        __m512i mix_ac2 = _mm512_or_si512(a_shift, c_shift24);
+        d = _mm512_xor_si512(d, mix_ac2);
         
         // Last AES of double-round - direct computation again
         combined0 = _mm512_xor_si512(d, rc3b);
@@ -227,21 +267,37 @@ void faester_permute(faester_state_t *state, const int rounds) {
         c = _mm512_shuffle_i32x4(t2, t2, 0x39);
         d = _mm512_shuffle_i32x4(t3, t3, 0xC6);
         
-        // Mixing
-        t0 = a; // Save original a
-        
-        // Mix operations
-        __m512i mix_bd = _mm512_or_si512(_mm512_srli_epi32(b, 8), _mm512_slli_epi32(d, 24));
-        a = _mm512_xor_si512(a, mix_bd);
-        
-        __m512i mix_ca = _mm512_or_si512(_mm512_srli_epi32(c, 8), _mm512_slli_epi32(t0, 24));
-        b = _mm512_xor_si512(b, mix_ca);
-        
-        __m512i mix_db = _mm512_or_si512(_mm512_srli_epi32(d, 8), _mm512_slli_epi32(b, 24));
-        c = _mm512_xor_si512(c, mix_db);
-        
-        __m512i mix_ac = _mm512_or_si512(_mm512_srli_epi32(t0, 8), _mm512_slli_epi32(c, 24));
-        d = _mm512_xor_si512(d, mix_ac);
+        // Mixing - optimized for Zen 4 with reduced dependencies (final odd round)
+        // Save original a for later use
+        t0 = a;
+
+        // Pre-compute all shift operations before XORs to improve instruction parallelism
+        __m512i b_shift3 = _mm512_srli_epi32(b, 8);
+        __m512i d_shift24_3 = _mm512_slli_epi32(d, 24);
+        __m512i c_shift3 = _mm512_srli_epi32(c, 8);
+        __m512i a_shift24_3 = _mm512_slli_epi32(t0, 24);
+
+        // Mix 1: Combine b and d parts (final round)
+        __m512i mix_bd3 = _mm512_or_si512(b_shift3, d_shift24_3);
+        a = _mm512_xor_si512(a, mix_bd3);
+
+        // Mix 2: Combine c and original a parts (final round)
+        __m512i mix_ca3 = _mm512_or_si512(c_shift3, a_shift24_3);
+        b = _mm512_xor_si512(b, mix_ca3);
+
+        // Second batch of precomputed shifts
+        __m512i d_shift3 = _mm512_srli_epi32(d, 8);
+        __m512i b_shift24_3 = _mm512_slli_epi32(b, 24);
+        __m512i a_shift3 = _mm512_srli_epi32(t0, 8);
+        __m512i c_shift24_3 = _mm512_slli_epi32(c, 24);
+
+        // Mix 3: Combine d and new b parts (final round)
+        __m512i mix_db3 = _mm512_or_si512(d_shift3, b_shift24_3);
+        c = _mm512_xor_si512(c, mix_db3);
+
+        // Mix 4: Combine original a and new c parts (final round)
+        __m512i mix_ac3 = _mm512_or_si512(a_shift3, c_shift24_3);
+        d = _mm512_xor_si512(d, mix_ac3);
         
         // Second AES
         __m512i combined0 = _mm512_xor_si512(d, rc3);

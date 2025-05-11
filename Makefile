@@ -65,8 +65,16 @@ benchmark_compare: benchmark_compare.c $(SRCS) $(AREION_SRCS) $(HEADERS) $(AREIO
 benchmark_optimized: benchmark_optimized.c $(AREION_SRCS) $(AREION_HEADERS)
 	$(CC) $(ALL_FLAGS) -o $@ $< $(AREION_SRCS) -lm
 
+# For Zen 4, we add special optimization flags
+ZEN4_FLAGS = -march=znver4 -mtune=znver4 -funroll-loops -ftree-vectorize
+
+# If znver4 is not supported (e.g., older GCC), fall back to znver3 or generic
+ZEN4_FLAGS := $(shell if $(CC) -march=znver4 -E - </dev/null >/dev/null 2>&1; then echo "$(ZEN4_FLAGS)"; \
+              elif $(CC) -march=znver3 -E - </dev/null >/dev/null 2>&1; then echo "-march=znver3 -mtune=znver3 -funroll-loops -ftree-vectorize"; \
+              else echo "-funroll-loops -ftree-vectorize"; fi)
+
 faester_zen4: $(SRC_DIR)/faester_avx512_zen4.c $(HEADERS)
-	$(CC) $(ALL_FLAGS) -o faester_zen4 -DFAESTER_ZEN4 benchmark.c $(SRC_DIR)/faester_avx512_zen4.c -lm
+	$(CC) $(ALL_FLAGS) $(ZEN4_FLAGS) -o faester_zen4 -DFAESTER_ZEN4 benchmark.c $(SRC_DIR)/faester_avx512_zen4.c -lm
 
 clean:
 	rm -f benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test compare_permutations benchmark_compare benchmark_optimized faester_zen4

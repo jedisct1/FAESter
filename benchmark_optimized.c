@@ -5,6 +5,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <math.h>
+#include <errno.h>   // For posix_memalign error codes
 #include "test/areion.h"
 
 #ifdef __APPLE__
@@ -423,17 +424,11 @@ static const uint32_t RC_OPTIMIZED[8][16] __attribute__((aligned(64))) = {
     }
 };
 
-// Precompute shuffle masks for faster 128-bit lane shuffling
-static const int SHUFFLE_MASK_1 = 0x4E; // Shuffle: 0,1,2,3 -> 2,3,0,1
-static const int SHUFFLE_MASK_2 = 0x93; // Shuffle: 0,1,2,3 -> 1,0,3,2
-static const int SHUFFLE_MASK_3 = 0x39; // Shuffle: 0,1,2,3 -> 3,2,1,0
-static const int SHUFFLE_MASK_4 = 0xC6; // Shuffle: 0,1,2,3 -> 0,2,1,3
-
-// Fast load RC constant
-static inline __m512i load_rc(int r, int offset) {
-    int index = (r + offset) % 8; // Wrap around after 8 rounds (matches the constant array)
-    return _mm512_loadu_si512((const __m512i*)RC_OPTIMIZED[index]);
-}
+// Shuffle constants for reference (directly used in code)
+// 0x4E: Shuffle: 0,1,2,3 -> 2,3,0,1
+// 0x93: Shuffle: 0,1,2,3 -> 1,0,3,2
+// 0x39: Shuffle: 0,1,2,3 -> 3,2,1,0
+// 0xC6: Shuffle: 0,1,2,3 -> 0,2,1,3
 
 // Initialize the permutation state with input data
 void faester_optimized_init(faester_state_t *state, const uint8_t *input) {
@@ -634,7 +629,7 @@ typedef void (*extract_fn_t)(const void* state, uint8_t* output);
 
 // Benchmark a permutation function
 static stats_t benchmark_permutation(
-    const char* name, 
+    const char* name,
     size_t state_size,
     size_t input_size,
     init_fn_t init_fn,
@@ -642,19 +637,27 @@ static stats_t benchmark_permutation(
     extract_fn_t extract_fn,
     int rounds,
     double *throughput) {
-    
+
     uint8_t *input = calloc(input_size, 1);
     uint8_t *output = calloc(input_size, 1);
-    void *state = calloc(state_size, 1);
-    
+
+    // IMPORTANT: For Faester state, we need to allocate enough for __m512i alignment
+    // Allocate with 64-byte alignment for AVX-512
+    void *state;
+    if (posix_memalign(&state, 64, state_size) != 0) {
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(1);
+    }
+    memset(state, 0, state_size);
+
     // Initialize input with some data
     for (size_t i = 0; i < input_size; i++) {
         input[i] = (uint8_t)i;
     }
-    
+
     // Initialize state
     init_fn(state, input);
-    
+
     // Warmup phase
     for (int i = 0; i < WARMUP_ITERATIONS; i++) {
         permute_fn(state, rounds);
@@ -690,15 +693,14 @@ static stats_t benchmark_permutation(
             nonzero_count++;
         }
     }
-    printf("  Output verification: %zu non-zero bytes out of %zu\n", nonzero_count, input_size);
+    printf("  Output verification: %d non-zero bytes out of %zu\n", nonzero_count, input_size);
     
     // Calculate statistics
     stats_t stats = calculate_stats(measurements, BENCHMARK_ITERATIONS);
-    
+
     // Calculate throughput
     double bytes = (double)input_size;
-    double cpu_freq_ghz = estimate_cpu_freq_ghz();
-    
+
     #ifdef __APPLE__
     // On macOS, our cycle counts are actually in nanoseconds
     // So we calculate GB/s directly
@@ -706,16 +708,18 @@ static stats_t benchmark_permutation(
     double bytes_per_second = 1e9 / ns_per_byte;
     *throughput = bytes_per_second / 1e9; // GB/s
     #else
+    // For non-Apple platforms, we need the CPU frequency
+    double cpu_freq_ghz = estimate_cpu_freq_ghz();
     // On x86, we have actual cycle counts
     double cycles_per_byte = stats.median / bytes;
     *throughput = (cpu_freq_ghz * 1e9) / (cycles_per_byte * 1e9);
     #endif
     
     free(measurements);
-    free(state);
+    free(state); // Now correctly allocated with posix_memalign
     free(input);
     free(output);
-    
+
     return stats;
 }
 
@@ -892,40 +896,45 @@ int main(int argc, char *argv[]) {
     double cpu_freq_ghz = estimate_cpu_freq_ghz();
     printf("Estimated CPU frequency: %.2f GHz\n\n", cpu_freq_ghz);
     
+    // We need to ensure we have enough aligned memory for AVX-512 operations
+    // Make sure faester_state_t's size is a multiple of 64 (for AVX-512 alignment)
+    size_t faester_size = ((sizeof(faester_state_t) + 63) / 64) * 64;
+    size_t areion_size = ((sizeof(areion512_state_t) + 15) / 16) * 16; // 16-byte alignment for __m128i
+
     // Benchmark FAESTER Original
     double original_throughput;
     stats_t original_stats = benchmark_permutation(
-        "FAESTER Original", 
-        sizeof(faester_state_t), 
+        "FAESTER Original",
+        faester_size,
         256,
-        faester_original_init_wrapper, 
-        faester_original_permute_wrapper, 
+        faester_original_init_wrapper,
+        faester_original_permute_wrapper,
         faester_original_extract_wrapper,
-        faester_rounds, 
+        faester_rounds,
         &original_throughput
     );
-    
-    // Benchmark FAESTER Optimized 
+
+    // Benchmark FAESTER Optimized
     double optimized_throughput;
     stats_t optimized_stats = benchmark_permutation(
-        "FAESTER Optimized", 
-        sizeof(faester_state_t), 
+        "FAESTER Optimized",
+        faester_size,
         256,
-        faester_optimized_init_wrapper, 
-        faester_optimized_permute_wrapper, 
+        faester_optimized_init_wrapper,
+        faester_optimized_permute_wrapper,
         faester_optimized_extract_wrapper,
-        faester_rounds, 
+        faester_rounds,
         &optimized_throughput
     );
-    
+
     // Benchmark AREION
     double areion_throughput;
     stats_t areion_stats = benchmark_permutation(
-        "AREION", 
-        sizeof(areion512_state_t), 
+        "AREION",
+        areion_size,
         64,
-        areion_init_wrapper, 
-        areion_permute_wrapper, 
+        areion_init_wrapper,
+        areion_permute_wrapper,
         areion_extract_wrapper,
         15, // AREION always uses 15 rounds
         &areion_throughput
