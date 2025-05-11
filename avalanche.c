@@ -71,6 +71,7 @@ int main() {
     double chi_square = 0.0;
     double max_deviation = 0.0;
     double min_prob = 1.0, max_prob = 0.0;
+    double average_prob = 0.0;
     
     if (!bit_flip_counts || !bit_probabilities) {
         fprintf(stderr, "Memory allocation failed\n");

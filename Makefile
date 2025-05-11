@@ -24,12 +24,15 @@ endif
 ALL_FLAGS = $(CFLAGS) $(AVX512_FLAGS) $(PLATFORM_FLAGS)
 
 SRC_DIR = src
+TEST_DIR = test
 SRCS = $(SRC_DIR)/faester_avx512.c
+AREION_SRCS = $(TEST_DIR)/areion.c
 HEADERS = $(SRC_DIR)/faester_avx512.h $(SRC_DIR)/untrinsics/untrinsics.h $(SRC_DIR)/untrinsics/untrinsics_avx512.h
+AREION_HEADERS = $(TEST_DIR)/areion.h
 
-.PHONY: all clean bench run
+.PHONY: all clean bench run compare
 
-all: benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test
+all: benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test compare_permutations benchmark_compare
 
 bench: benchmark benchmark_advanced
 
@@ -51,8 +54,14 @@ crypto_properties: crypto_properties.c $(SRCS) $(HEADERS)
 diffusion_test: diffusion_test.c $(SRCS) $(HEADERS)
 	$(CC) $(ALL_FLAGS) -o $@ $< $(SRCS) -lm
 
+compare_permutations: compare_permutations.c $(SRCS) $(AREION_SRCS) $(HEADERS) $(AREION_HEADERS)
+	$(CC) $(ALL_FLAGS) -o $@ $< $(SRCS) $(AREION_SRCS) -lm
+
+benchmark_compare: benchmark_compare.c $(SRCS) $(AREION_SRCS) $(HEADERS) $(AREION_HEADERS)
+	$(CC) $(ALL_FLAGS) -o $@ $< $(SRCS) $(AREION_SRCS) -lm
+
 clean:
-	rm -f benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test
+	rm -f benchmark benchmark_advanced avalanche avalanche_detailed crypto_properties diffusion_test compare_permutations benchmark_compare
 
 run: benchmark
 	./benchmark
@@ -71,3 +80,9 @@ run_crypto: crypto_properties
 
 run_diffusion: diffusion_test
 	./diffusion_test
+
+run_compare: compare_permutations
+	./compare_permutations
+
+run_bench_compare: benchmark_compare
+	./benchmark_compare
